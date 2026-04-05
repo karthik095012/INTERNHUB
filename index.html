@@ -432,6 +432,7 @@
       <button class="s-tab nav-btn"    data-tab="saved"  onclick="renderStudentDash('saved')" style="border-radius:8px 8px 0 0;padding:10px 18px">❤️ Saved Jobs</button>
       <button class="s-tab nav-btn"    data-tab="resume" onclick="renderStudentDash('resume')" style="border-radius:8px 8px 0 0;padding:10px 18px">📄 My Resume</button>
       <button class="s-tab nav-btn"    data-tab="browse" onclick="Router.go('browse')"        style="border-radius:8px 8px 0 0;padding:10px 18px">🔍 Browse Jobs</button>
+      <button class="s-tab nav-btn"    data-tab="settings" onclick="renderStudentDash('settings')" style="border-radius:8px 8px 0 0;padding:10px 18px">⚙️ Settings</button>
     </div>
 
     <!-- Tab: Applications + Suggested -->
@@ -512,6 +513,17 @@
       </div>
     </div>
 
+    <!-- Tab: Settings -->
+    <div class="s-tab-panel" data-tab="settings" style="display:none">
+      <div class="dash-sec">
+        <div class="dash-sec-hdr">
+          <div class="sec-title">Account Settings</div>
+          <div class="sec-sub">Manage your account and privacy settings</div>
+        </div>
+        <div id="s-settings"></div>
+      </div>
+    </div>
+
   </div>
 </div><!-- /page-student-dash -->
 
@@ -554,6 +566,7 @@
       <button class="r-tab nav-btn"    data-tab="applicants" onclick="renderRecruiterDash('applicants')" style="border-radius:8px 8px 0 0;padding:10px 18px">👥 Applicants &amp; Resumes</button>
       <button class="r-tab nav-btn"    data-tab="offers" onclick="renderRecruiterDash('offers')" style="border-radius:8px 8px 0 0;padding:10px 18px">📧 Selected Candidates & Offers</button>
       <button class="r-tab nav-btn"    data-tab="interviews" onclick="renderRecruiterDash('interviews')" style="border-radius:8px 8px 0 0;padding:10px 18px">🎙️ Technical Rounds & Interviews</button>
+      <button class="r-tab nav-btn"    data-tab="settings" onclick="renderRecruiterDash('settings')" style="border-radius:8px 8px 0 0;padding:10px 18px">⚙️ Settings</button>
     </div>
 
     <!-- Tab: My Jobs -->
@@ -599,6 +612,17 @@
           <div class="sec-sub">Schedule technical rounds and interviews for selected candidates</div>
         </div>
         <div id="r-interviews"></div>
+      </div>
+    </div>
+
+    <!-- Tab: Settings -->
+    <div class="r-tab-panel" data-tab="settings" style="display:none">
+      <div class="rec-sec">
+        <div class="rec-sec-hdr">
+          <div class="sec-title">Account Settings</div>
+          <div class="sec-sub">Manage your account and privacy settings</div>
+        </div>
+        <div id="r-settings"></div>
       </div>
     </div>
 

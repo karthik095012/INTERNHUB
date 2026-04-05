@@ -315,7 +315,7 @@ const DB = {
     try {
       return this.getApps()
         .filter(a => a.jobId === jobId)
-        .map(a => ({ ...a, student: this.findUserById(a.studentId), resume: this.getResume(a.studentId) }));
+        .map(a => ({ ...a, student: a.student || this.findUserById(a.studentId), resume: this.getResume(a.studentId) }));
     } catch(e) {
       console.warn('getAppsForJob error:', e);
       return [];
@@ -329,7 +329,8 @@ const DB = {
         .filter(a => rJobs.includes(a.jobId))
         .map(a => ({
           ...a,
-          student:  this.findUserById(a.studentId),
+          // Use student data from API if available, otherwise look up from database
+          student:  a.student || this.findUserById(a.studentId),
           job:      this.getJobById(a.jobId),
           resume:   this.getResume(a.studentId),
         }));
@@ -545,17 +546,101 @@ const DB = {
       console.error('deleteInterview error:', e);
     }
   },
+
+  // ── OFFERS ──────────────────────────────────────────────
+  getOffers() {
+    try {
+      const o = localStorage.getItem("ih_offers");
+      return o && Validate.safeJSON(o) ? JSON.parse(o) : [];
+    } catch(e) {
+      console.error('getOffers error:', e);
+      return [];
+    }
+  },
+
+  saveOffers(offers) {
+    try {
+      localStorage.setItem("ih_offers", JSON.stringify(offers));
+      DataBackup.autoBackup();
+    } catch(e) {
+      console.error('saveOffers error:', e);
+    }
+  },
+
+  getOffersForStudent(studentId) {
+    try {
+      return this.getOffers()
+        .filter(o => o.studentId === studentId)
+        .map(o => ({ ...o, job: this.getJobById(o.jobId) }));
+    } catch(e) {
+      console.warn('getOffersForStudent error:', e);
+      return [];
+    }
+  },
+
+  getOffersForRecruiter(recruiterId) {
+    try {
+      return this.getOffers()
+        .filter(o => o.recruiterId === recruiterId)
+        .map(o => ({ ...o, job: this.getJobById(o.jobId), student: this.findUserById(o.studentId) }));
+    } catch(e) {
+      console.warn('getOffersForRecruiter error:', e);
+      return [];
+    }
+  },
+
+  updateOfferStatus(offerId, status) {
+    try {
+      const offers = this.getOffers().map(o => o.id === offerId ? { ...o, status } : o);
+      this.saveOffers(offers);
+    } catch(e) {
+      console.error('updateOfferStatus error:', e);
+    }
+  },
+
+  deleteOffer(offerId) {
+    try {
+      this.saveOffers(this.getOffers().filter(o => o.id !== offerId));
+    } catch(e) {
+      console.error('deleteOffer error:', e);
+    }
+  },
 };
 
 // ── Auth shorthand ───────────────────────────────────────────
 const Auth = {
-  current()              { return DB.getSession(); },
-  login(email, pw)       {
+  current() { 
+    // Get session from sessionStorage
+    return DB.getSession();
+  },
+  
+  login(email, pw) {
     const u = DB.verifyUser(email, pw);
-    if (u) DB.setSession(u);
+    if (u) {
+      DB.setSession(u);
+      // Also save to localStorage as backup for session recovery
+      try {
+        localStorage.setItem("ih_last_login", JSON.stringify({
+          email: u.email,
+          role: u.role,
+          timestamp: new Date().toISOString()
+        }));
+      } catch(e) {
+        console.warn('Could not save last login:', e);
+      }
+    }
     return u;
   },
-  logout()               { DB.clearSession(); },
-  isStudent()            { return this.current()?.role === "student"; },
-  isRecruiter()          { return this.current()?.role === "recruiter"; },
+  
+  logout() { 
+    DB.clearSession();
+    try {
+      localStorage.removeItem("ih_last_login");
+    } catch(e) {
+      console.warn('Could not clear last login:', e);
+    }
+  },
+  
+  isStudent() { return this.current()?.role === "student"; },
+  isRecruiter() { return this.current()?.role === "recruiter"; },
 };

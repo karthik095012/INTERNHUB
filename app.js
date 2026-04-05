@@ -13,6 +13,224 @@ window.addEventListener('unhandledrejection', (e) => {
   toast('An unexpected error occurred.', 'err');
 });
 
+/* ── API Configuration ──────────────────────────────────────────────── */
+const API_BASE = 'http://localhost:8000/api/controllers';
+
+// API Helper Functions
+async function apiCall(endpoint, method = 'GET', data = null) {
+  try {
+    // Validate data is JSON serializable
+    let bodyStr = null;
+    if (data) {
+      bodyStr = JSON.stringify(data);
+      console.log(`📤 API Call: ${method} ${endpoint}`, data);
+    }
+    
+    const options = {
+      method,
+      headers: { 'Content-Type': 'application/json' }
+    };
+    if (bodyStr) options.body = bodyStr;
+    
+    const response = await fetch(`${API_BASE}${endpoint}`, options);
+    
+    // Check if response is OK
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ HTTP ${response.status}:`, errorText);
+      return { success: false, error: `HTTP ${response.status}: ${errorText}` };
+    }
+    
+    const result = await response.json();
+    console.log(`✅ API Response:`, result);
+    return result;
+  } catch (error) {
+    console.error('❌ API Error:', error);
+    toast(`API Error: ${error.message}`, 'err');
+    return { success: false, error: error.message };
+  }
+}
+
+/* ── Job Normalization Helper ────────────────────────────────── */
+function normalizeJobsFromAPI(jobsRaw) {
+  if (!Array.isArray(jobsRaw)) return [];
+  return jobsRaw.map(j => ({
+    id: j.id,
+    recruiterId: j.recruiter_id,
+    title: j.title,
+    company: j.company,
+    description: j.description || '',
+    location: j.location || '',
+    stipend: j.stipend || '',
+    duration: j.duration || '',
+    deadline: j.deadline || '',
+    skills: [],
+    logo: (j.title || 'J').charAt(0).toUpperCase(),
+    color: '#2563eb',
+    active: j.active !== 0,
+    paid: true,
+    postedAt: j.created_at || new Date().toISOString()
+  }));
+}
+
+function normalizeApplicationsFromAPI(appsRaw) {
+  if (!Array.isArray(appsRaw)) return [];
+  return appsRaw.map(a => ({
+    id: a.id,
+    studentId: a.student_id,
+    jobId: a.job_id,
+    status: a.status || 'Applied',
+    coverNote: a.cover_note || '',
+    appliedAt: a.applied_at || new Date().toISOString(),
+    title: a.title,
+    company: a.company,
+    stipend: a.stipend,
+    student: {
+      id: a.student_id,
+      name: a.name || 'Unknown Student',
+      email: a.email || 'N/A'
+    }
+  }));
+}
+
+function normalizeInterviewsFromAPI(interviewsRaw) {
+  if (!Array.isArray(interviewsRaw)) return [];
+  return interviewsRaw.map(i => ({
+    id: i.id,
+    recruiterId: i.recruiter_id,
+    studentId: i.student_id,
+    jobId: i.job_id,
+    type: i.type || 'Technical',
+    status: i.status || 'Scheduled',
+    interviewDate: i.interview_date || '',
+    interviewTime: i.interview_time || '',
+    joinLink: i.join_link || '',
+    createdAt: i.created_at || new Date().toISOString(),
+    title: i.title,
+    company: i.company,
+    jobTitle: i.job_title,
+    recruiterName: i.recruiter_name,
+    candidateName: i.candidate_name || 'Unknown Student',
+    candidateEmail: i.candidate_email || 'N/A'
+  }));
+}
+
+function normalizeOffersFromAPI(offersRaw) {
+  if (!Array.isArray(offersRaw)) return [];
+  return offersRaw.map(o => ({
+    id: o.id,
+    studentId: o.student_id,
+    jobId: o.job_id,
+    recruiterId: o.recruiter_id,
+    status: o.status || 'Sent',
+    offerText: o.offer_text || '',
+    createdAt: o.created_at || new Date().toISOString(),
+    title: o.title,
+    company: o.company,
+    studentName: o.name || 'Unknown Student',
+    studentEmail: o.email || 'N/A'
+  }));
+}
+
+
+/* ── Job Sync System (Real-time Updates) ─────────────────────── */
+const JobSync = {
+  pollInterval: null,
+  lastSyncTime: 0,
+  
+  init() {
+    // Listen for new job posted events
+    document.addEventListener('newJobPosted', () => this.syncJobs());
+  },
+  
+  start() {
+    // Poll for new jobs every 5 seconds on student pages
+    this.pollInterval = setInterval(() => this.syncJobs(), 5000);
+  },
+  
+  stop() {
+    if (this.pollInterval) clearInterval(this.pollInterval);
+  },
+  
+  async syncJobs() {
+    const user = Auth.current();
+    if (!user) return;
+    
+    // For students: sync jobs and notify of new postings
+    if (user.role === 'student') {
+      if (Router.cur !== 'landing' && Router.cur !== 'browse' && Router.cur !== 'student-dash') return;
+      
+      try {
+        const jobsRaw = await apiCall('/Jobs.php', 'GET');
+        const jobs = normalizeJobsFromAPI(jobsRaw);
+        
+        const localJobs = DB.getJobs();
+        const localCount = localJobs.length;
+        const serverCount = jobs.length;
+        
+        // Check if there are new jobs
+        if (serverCount > localCount) {
+          console.log(`🔄 New jobs detected! Local: ${localCount}, Server: ${serverCount}`);
+          DB.saveJobs(jobs);
+          
+          // Refresh current page to show new jobs
+          this.refreshCurrentPage();
+        }
+      } catch (error) {
+        console.warn('Job sync error:', error);
+      }
+    }
+    
+    // For both students and recruiters: sync applications
+    await this.syncApplications();
+  },
+  
+  async syncApplications() {
+    const user = Auth.current();
+    if (!user) return;
+    
+    try {
+      let appsRaw;
+      if (user.role === 'student') {
+        appsRaw = await apiCall(`/Applications.php?student_id=${user.id}`, 'GET');
+      } else if (user.role === 'recruiter') {
+        appsRaw = await apiCall(`/Applications.php?recruiter_id=${user.id}`, 'GET');
+      } else {
+        return;
+      }
+      
+      const apps = normalizeApplicationsFromAPI(appsRaw);
+      const oldCount = DB.getApps().length;
+      DB.saveApps(apps);
+      console.log(`📋 Synced ${apps.length} applications from API`);
+      
+      // Refresh recruiter dashboard if viewing applicants and new applications arrived
+      if (user.role === 'recruiter' && Router.cur === 'recruiter-dash' && Router.curTab === 'applicants' && apps.length > oldCount) {
+        console.log('✨ New applications arrived!');
+        renderRecruiterDash('applicants');
+        toast('📋 New application received!', 'ok');
+      }
+    } catch (error) {
+      console.warn('Application sync error:', error);
+    }
+  },
+  
+  refreshCurrentPage() {
+    const user = Auth.current();
+    if (!user) return;
+    
+    if (Router.cur === 'landing') {
+      renderLanding();
+      toast('✨ New jobs available!', 'ok');
+    } else if (Router.cur === 'browse') {
+      doBrowseSearch();
+      toast('✨ New jobs available!', 'ok');
+    } else if (Router.cur === 'student-dash' && Router.curTab === 'jobs') {
+      renderStudentDash('jobs');
+    }
+  }
+};
+
 /* ── Utilities ──────────────────────────────────────────────── */
 const $ = id => {
   try { return document.getElementById(id); } 
@@ -166,7 +384,91 @@ const OllamaService = {
 };
 
 // Initialize on load
-window.addEventListener('DOMContentLoaded', () => OllamaService.init());
+window.addEventListener('DOMContentLoaded', async () => {
+  OllamaService.init();
+  JobSync.init();
+  
+  // Load jobs from API on startup
+  try {
+    const jobsRaw = await apiCall('/Jobs.php', 'GET');
+    const jobs = normalizeJobsFromAPI(jobsRaw);
+    if (jobs.length > 0) {
+      console.log(`📥 Loaded ${jobs.length} jobs from API`);
+      DB.saveJobs(jobs);
+    }
+  } catch (error) {
+    console.error('Failed to load jobs from API:', error);
+  }
+  
+  // Load applications from API on startup
+  try {
+    const user = Auth.current();
+    if (user) {
+      let appsRaw;
+      if (user.role === 'student') {
+        appsRaw = await apiCall(`/Applications.php?student_id=${user.id}`, 'GET');
+      } else if (user.role === 'recruiter') {
+        appsRaw = await apiCall(`/Applications.php?recruiter_id=${user.id}`, 'GET');
+      }
+      
+      if (appsRaw) {
+        const apps = normalizeApplicationsFromAPI(appsRaw);
+        if (apps.length > 0) {
+          console.log(`📥 Loaded ${apps.length} applications from API`);
+          DB.saveApps(apps);
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to load applications from API:', error);
+  }
+  
+  // Load interviews from API on startup
+  try {
+    const user = Auth.current();
+    if (user) {
+      let interviewsRaw;
+      if (user.role === 'student') {
+        interviewsRaw = await apiCall(`/Interviews.php?student_id=${user.id}`, 'GET');
+      } else if (user.role === 'recruiter') {
+        interviewsRaw = await apiCall(`/Interviews.php?recruiter_id=${user.id}`, 'GET');
+      }
+      
+      if (interviewsRaw) {
+        const interviews = normalizeInterviewsFromAPI(interviewsRaw);
+        if (interviews.length > 0) {
+          console.log(`📅 Loaded ${interviews.length} interviews from API`);
+          DB.saveInterviews(interviews);
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to load interviews from API:', error);
+  }
+  
+  // Load offers from API on startup
+  try {
+    const user = Auth.current();
+    if (user) {
+      let offersRaw;
+      if (user.role === 'student') {
+        offersRaw = await apiCall(`/Offers.php?student_id=${user.id}`, 'GET');
+      } else if (user.role === 'recruiter') {
+        offersRaw = await apiCall(`/Offers.php?recruiter_id=${user.id}`, 'GET');
+      }
+      
+      if (offersRaw) {
+        const offers = normalizeOffersFromAPI(offersRaw);
+        if (offers.length > 0) {
+          console.log(`🎁 Loaded ${offers.length} offers from API`);
+          DB.saveOffers(offers);
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to load offers from API:', error);
+  }
+});
 
 /* ── Router ─────────────────────────────────────────────────── */
 const Router = {
@@ -189,12 +491,30 @@ const Router = {
     this.cur = page;
     window.scrollTo({top:0,behavior:'smooth'});
     updateNav();
-    if (page==='landing')       renderLanding();
-    if (page==='browse')        renderBrowse();
+    
+    // Stop job sync when leaving student pages
+    if ((page !== 'landing' && page !== 'browse' && page !== 'student-dash') && user?.role === 'student') {
+      JobSync.stop();
+    }
+    
+    if (page==='landing') {
+      renderLanding();
+      if (user?.role === 'student') JobSync.start();
+    }
+    if (page==='browse') {
+      renderBrowse();
+      if (user?.role === 'student') JobSync.start();
+    }
     if (page==='login')         setupLogin(opts.role||'student');
     if (page==='register')      setupRegister(opts.role||'student');
-    if (page==='student-dash')  renderStudentDash(opts.tab||'jobs');
-    if (page==='recruiter-dash')renderRecruiterDash(opts.tab||'jobs');
+    if (page==='student-dash')  {
+      renderStudentDash(opts.tab||'jobs');
+      JobSync.start();
+    }
+    if (page==='recruiter-dash') {
+      renderRecruiterDash(opts.tab||'jobs');
+      if (user?.role === 'recruiter') JobSync.start(); // Sync applications in real-time
+    }
   }
 };
 
@@ -259,6 +579,62 @@ function doLogout() {
   Auth.logout();
   toast('Signed out. See you soon!');
   Router.go('landing');
+}
+
+function initiateDeleteAccount(userId, role, name) {
+  openModal(
+    `<div><div style="font-weight:700;font-size:1.1rem;margin-bottom:4px;color:var(--red)">🗑️ Delete Account</div><div style="font-size:.85rem;color:var(--tx3)">This action cannot be undone</div></div>`,
+    `<div style="margin-top:14px">
+      <div style="padding:12px;background:#ffebee;border-radius:8px;border-left:3px solid var(--red);margin-bottom:16px">
+        <strong>⚠️ Warning:</strong> Deleting your account will permanently remove all your data including:
+        <ul style="margin-top:8px;margin-bottom:0;padding-left:20px">
+          ${role === 'student' ? `
+            <li>Your applications and offers</li>
+            <li>Your resume</li>
+            <li>Your saved jobs and interview records</li>
+          ` : `
+            <li>All your job postings</li>
+            <li>All applicant records and interview data</li>
+            <li>All candidate offers and communications</li>
+          `}
+        </ul>
+      </div>
+      <p style="color:var(--tx2);margin-bottom:12px">To confirm deletion, type your name below:</p>
+      <input type="text" id="delete-confirm-input" placeholder="${esc(name)}" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:6px;font-size:.9rem;margin-bottom:16px"/>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-ghost" style="flex:1" onclick="closeModal()">Cancel</button>
+        <button class="btn" style="flex:1;background:var(--red);color:#fff;border:none" onclick="confirmDeleteAccount('${userId}','${role}','${esc(name)}')">🗑️ Delete Account</button>
+      </div>
+    </div>`
+  );
+}
+
+function confirmDeleteAccount(userId, role, expectedName) {
+  const confirmInput = $('delete-confirm-input');
+  if (!confirmInput || confirmInput.value.trim() !== expectedName) {
+    toast('Name does not match. Please try again.', 'err');
+    return;
+  }
+  
+  const userId_clean = parseInt(String(userId).replace(/[^0-9]/g, ''));
+  
+  apiCall('/Users.php', 'DELETE', {
+    id: userId_clean
+  }).then(result => {
+    if (result && result.success) {
+      toast('✓ Account deleted successfully', 'ok');
+      closeModal();
+      setTimeout(() => {
+        Auth.logout();
+        Router.go('landing');
+      }, 1000);
+    } else {
+      toast('Error: ' + (result?.error || 'Failed to delete account'), 'err');
+    }
+  }).catch(err => {
+    console.error('Error deleting account:', err);
+    toast('Error deleting account: ' + err.message, 'err');
+  });
 }
 
 /* Mobile drawer */
@@ -474,26 +850,49 @@ function handleApplyClick(e, id, btn) {
   }
 }
 
-function toggleSaveJob(e, jobId) {
+async function toggleSaveJob(e, jobId) {
   e.stopPropagation();
   const user = Auth.current();
   if (!user || user.role !== 'student') {
     Router.go('login',{role:'student'});
     return;
   }
-  const isSaved = DB.isSaved(user.id, jobId);
-  if (isSaved) {
-    DB.unsaveJob(user.id, jobId);
-    toast('Job removed from saved', 'ok');
-  } else {
-    DB.saveJob(user.id, jobId);
-    toast('Job saved! ❤️', 'ok');
+
+  // Extract numeric IDs
+  const studentId = parseInt(String(user.id).replace(/[^0-9]/g, ''));
+  const numJobId = parseInt(String(jobId).replace(/[^0-9]/g, ''));
+
+  // Check actual saved status
+  const isSaved = DB.isSaved(studentId, numJobId);
+
+  try {
+    if (isSaved) {
+      // Remove from saved
+      await apiCall('/SavedJobs.php', 'DELETE', { 
+        student_id: studentId, 
+        job_id: numJobId 
+      });
+      DB.unsaveJob(studentId, numJobId);
+      toast('Job removed from saved', 'ok');
+    } else {
+      // Save the job
+      await apiCall('/SavedJobs.php', 'POST', { 
+        action: 'save',
+        student_id: studentId, 
+        job_id: numJobId 
+      });
+      DB.saveJob(studentId, numJobId);
+      toast('Job saved! ❤️', 'ok');
+    }
+    
+    const current = $('page-landing').classList.contains('active') ? 'landing' : 
+                    $('page-student-dash').classList.contains('active') ? 'student-dash' : null;
+    if (current === 'landing') renderLanding();
+    else if (current === 'student-dash') renderStudentDash(Router.curTab);
+  } catch (error) {
+    console.error('Error toggling save:', error);
+    toast('Error saving job. Please try again.', 'err');
   }
-  // Refresh grid
-  const current = $('page-landing').classList.contains('active') ? 'landing' : 
-                  $('page-student-dash').classList.contains('active') ? 'student-dash' : null;
-  if (current === 'landing') renderLanding();
-  else if (current === 'student-dash') renderStudentDash(Router.curTab);
 }
 
 function openApplyModal(jobId, btn, noResume) {
@@ -561,15 +960,39 @@ async function generateCoverLetterAI(jobId, studentName) {
   }
 }
 
-function submitApply(jobId) {
+async function submitApply(jobId) {
   const user = Auth.current();
   const note = $('cover-note')?.value.trim() || '';
-  DB.apply(user.id, jobId, note);
-  closeModal();
-  // Update card button
-  const btn = document.querySelector(`.apply-btn[data-id="${jobId}"]`);
-  if (btn) { btn.textContent='✓ Applied'; btn.classList.add('applied'); btn.disabled=true; }
-  toast('Application submitted! 🎉');
+  
+  // Extract numeric IDs (converts "s_123" or "3" to 123, and "j5" to 5)
+  const studentId = parseInt(String(user.id).replace(/[^0-9]/g, ''));
+  const numJobId = parseInt(String(jobId).replace(/[^0-9]/g, ''));
+  
+  const result = await apiCall('/Applications.php', 'POST', {
+    action: 'apply',
+    student_id: studentId,
+    job_id: numJobId,
+    cover_note: note
+  });
+
+  if (result.success) {
+    closeModal();
+    const btn = document.querySelector(`.apply-btn[data-id="${jobId}"]`);
+    if (btn) { btn.textContent='✓ Applied'; btn.classList.add('applied'); btn.disabled=true; }
+    toast('Application submitted! 🎉');
+    
+    // Fetch and sync student applications from API
+    try {
+      const appsRaw = await apiCall(`/Applications.php?student_id=${user.id}`, 'GET');
+      const apps = normalizeApplicationsFromAPI(appsRaw);
+      DB.saveApps(apps);
+      console.log(`📋 Updated student applications (${apps.length} total)`);
+    } catch (error) {
+      console.warn('Failed to sync applications:', error);
+    }
+  } else {
+    toast(result.error || 'Failed to apply', 'err');
+  }
 }
 
 function openJobDetail(jobId) {
@@ -672,39 +1095,109 @@ function setupLogin(role='student') {
 
 function switchLoginRole(role) { setupLogin(role); }
 
-function doLogin() {
+async function doLogin() {
   clearAlerts('login-alert');
   const email = $('l-email').value.trim();
   const pw    = $('l-pw').value;
   if (!email||!pw) { showAlert('login-alert','error','Please fill in all fields.'); return; }
 
-  const user = Auth.login(email, pw);
-  if (!user) { showAlert('login-alert','error','Incorrect email or password.'); return; }
+  // Call backend API for authentication
+  const result = await apiCall('/Auth.php', 'POST', {
+    action: 'login',
+    email: email,
+    password: pw
+  });
+  
+  if (!result.success) {
+    showAlert('login-alert','error', result.error || 'Login failed');
+    return;
+  }
+  
+  const user = result.user;
   if (user.role !== _authRole) {
-    Auth.logout();
     showAlert('login-alert','error',`This account is a ${user.role}. Please use the ${user.role} login tab.`);
     return;
+  }
+
+  // Store user in session
+  try {
+    const safe = { ...user };
+    delete safe.password;
+    sessionStorage.setItem('ih_session', JSON.stringify(safe));
+  } catch(e) {
+    console.warn('Could not save session:', e);
   }
 
   toast(`Welcome back, ${user.name.split(' ')[0]}! 👋`);
   Router.go(user.role==='student'?'student-dash':'recruiter-dash');
 }
 
-function demoStudentLogin() {
-  if (!DB.findUserByEmail('demo.student@internhub.com')) {
-    DB.createUser({name:'Demo Student',email:'demo.student@internhub.com',password:'demo1234',role:'student'});
+async function demoStudentLogin() {
+  // Try to create demo user first via API
+  await apiCall('/Auth.php', 'POST', {
+    action: 'register',
+    name: 'Demo Student',
+    email: 'demo.student@internhub.com',
+    password: 'demo1234',
+    role: 'student',
+    company: null
+  }).catch(e => console.log('User may already exist'));
+  
+  // Try to login
+  const loginResult = await apiCall('/Auth.php', 'POST', {
+    action: 'login',
+    email: 'demo.student@internhub.com',
+    password: 'demo1234'
+  });
+  
+  if (loginResult.success) {
+    const user = loginResult.user;
+    try {
+      const safe = { ...user };
+      delete safe.password;
+      sessionStorage.setItem('ih_session', JSON.stringify(safe));
+    } catch(e) {
+      console.warn('Could not save session:', e);
+    }
+    toast('Signed in as Demo Student 🚀');
+    Router.go('student-dash');
+  } else {
+    toast('Demo login failed: ' + (loginResult.error || 'unknown error'), 'err');
   }
-  Auth.login('demo.student@internhub.com','demo1234');
-  toast('Signed in as Demo Student 🚀');
-  Router.go('student-dash');
 }
-function demoRecruiterLogin() {
-  if (!DB.findUserByEmail('demo.recruiter@internhub.com')) {
-    DB.createUser({name:'Demo Recruiter',email:'demo.recruiter@internhub.com',password:'demo1234',role:'recruiter',company:'Demo Corp'});
+
+async function demoRecruiterLogin() {
+  // Try to create demo user first via API
+  await apiCall('/Auth.php', 'POST', {
+    action: 'register',
+    name: 'Demo Recruiter',
+    email: 'demo.recruiter@internhub.com',
+    password: 'demo1234',
+    role: 'recruiter',
+    company: 'Demo Corp'
+  }).catch(e => console.log('User may already exist'));
+  
+  // Try to login
+  const loginResult = await apiCall('/Auth.php', 'POST', {
+    action: 'login',
+    email: 'demo.recruiter@internhub.com',
+    password: 'demo1234'
+  });
+  
+  if (loginResult.success) {
+    const user = loginResult.user;
+    try {
+      const safe = { ...user };
+      delete safe.password;
+      sessionStorage.setItem('ih_session', JSON.stringify(safe));
+    } catch(e) {
+      console.warn('Could not save session:', e);
+    }
+    toast('Signed in as Demo Recruiter 🚀');
+    Router.go('recruiter-dash');
+  } else {
+    toast('Demo login failed: ' + (loginResult.error || 'unknown error'), 'err');
   }
-  Auth.login('demo.recruiter@internhub.com','demo1234');
-  toast('Signed in as Demo Recruiter 🚀');
-  Router.go('recruiter-dash');
 }
 
 function setupRegister(role='student') {
@@ -741,7 +1234,7 @@ function setupRegister(role='student') {
 }
 function switchRegRole(role) { setupRegister(role); }
 
-function doRegister() {
+async function doRegister() {
   clearAlerts('reg-alert');
   const name    = $('r-name').value.trim();
   const email   = $('r-email').value.trim();
@@ -756,10 +1249,45 @@ function doRegister() {
   if (_authRole==='recruiter'&&!company) errs.push('Company name is required for recruiters.');
   if (errs.length) { showAlert('reg-alert','error',errs.join(' ')); return; }
 
-  const result = DB.createUser({ name, email, password:pw, role:_authRole, company });
-  if (!result.ok) { showAlert('reg-alert','error',result.msg); return; }
+  // Call backend API for registration
+  const registerResult = await apiCall('/Auth.php', 'POST', {
+    action: 'register',
+    name: name,
+    email: email,
+    password: pw,
+    role: _authRole,
+    company: company || null
+  });
+  
+  if (!registerResult.success) {
+    showAlert('reg-alert','error', registerResult.error || 'Registration failed');
+    return;
+  }
 
-  Auth.login(email, pw);
+  // After successful registration, log them in
+  const loginResult = await apiCall('/Auth.php', 'POST', {
+    action: 'login',
+    email: email,
+    password: pw
+  });
+  
+  if (!loginResult.success) {
+    showAlert('reg-alert','error', 'Registration successful but login failed. Please try logging in.');
+    Router.go('login', { role: _authRole });
+    return;
+  }
+
+  const user = loginResult.user;
+  
+  // Store user in session
+  try {
+    const safe = { ...user };
+    delete safe.password;
+    sessionStorage.setItem('ih_session', JSON.stringify(safe));
+  } catch(e) {
+    console.warn('Could not save session:', e);
+  }
+
   toast('Account created! Welcome to InternHub 🎉');
   Router.go(_authRole==='student'?'student-dash':'recruiter-dash');
 }
@@ -769,11 +1297,31 @@ function doRegister() {
 ═══════════════════════════════════════════════════════════════ */
 let _studentTab = 'jobs';
 
-function renderStudentDash(tab='jobs') {
+async function renderStudentDash(tab='jobs') {
   _studentTab = tab;
   Router.curTab = tab;
   const user = Auth.current();
   $('s-dash-name').textContent = user.name.split(' ')[0];
+  
+  // Fetch fresh interviews from API for students
+  try {
+    const interviewsRaw = await apiCall(`/Interviews.php?student_id=${user.id}`, 'GET');
+    const interviews = normalizeInterviewsFromAPI(interviewsRaw);
+    DB.saveInterviews(interviews);
+    console.log(`📅 Fetched ${interviews.length} fresh interviews from API`);
+  } catch (error) {
+    console.warn('Failed to fetch interviews:', error);
+  }
+  
+  // Fetch fresh offers from API for students
+  try {
+    const offersRaw = await apiCall(`/Offers.php?student_id=${user.id}`, 'GET');
+    const offers = normalizeOffersFromAPI(offersRaw);
+    DB.saveOffers(offers);
+    console.log(`🎁 Fetched ${offers.length} fresh offers from API`);
+  } catch (error) {
+    console.warn('Failed to fetch offers:', error);
+  }
 
   const apps   = DB.getStudentApps(user.id);
   const resume = DB.getResume(user.id);
@@ -799,8 +1347,30 @@ function renderStudentDash(tab='jobs') {
   if (tab==='jobs') renderStudentJobsTab(apps, allJobs, applied);
   if (tab==='offers') renderStudentOffersTab(apps);
   if (tab==='interviews') renderStudentInterviewsTab(user);
-  if (tab==='saved') renderSavedJobsTab(user, saved, applied, apps);
+  if (tab==='saved') await fetchAndRenderSavedJobsTab(user, applied, apps);
   if (tab==='resume') renderResumeTab(user, resume);
+  if (tab==='settings') renderStudentSettingsTab(user);
+}
+
+function renderStudentSettingsTab(user) {
+  const el = $('s-settings');
+  el.innerHTML = `
+    <div style="max-width:600px">
+      <div style="padding:20px;background:var(--bg2);border-radius:12px;border-left:4px solid var(--red);margin-bottom:20px">
+        <div style="font-weight:600;margin-bottom:12px;color:var(--red)">⚠️ Danger Zone</div>
+        <p style="color:var(--tx2);margin-bottom:16px;font-size:.9rem">Deleting your account is permanent and cannot be undone. All your data including applications, offers, and resumes will be deleted.</p>
+        <button class="btn" style="background:var(--red);color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-weight:600" onclick="initiateDeleteAccount('${user.id}','student','${esc(user.name)}')">
+          🗑️ Delete My Account Permanently
+        </button>
+      </div>
+      
+      <div style="padding:16px;background:var(--bg2);border-radius:8px;color:var(--tx3);font-size:.85rem">
+        <strong>Account Information:</strong><br/>
+        Email: ${esc(user.email)}<br/>
+        Role: ${esc(user.role)}
+      </div>
+    </div>
+  `;
 }
 
 function renderStudentJobsTab(apps, allJobs, applied) {
@@ -868,6 +1438,27 @@ function renderStudentJobsTab(apps, allJobs, applied) {
           <button class="apply-btn" data-id="${j.id}" onclick="handleApplyClick(event,'${j.id}',this)">Apply</button>
         </div>
       </article>`).join('')}</div>`;
+  }
+}
+
+async function fetchAndRenderSavedJobsTab(user, applied, apps) {
+  try {
+    // Fetch fresh saved jobs from API
+    const savedJobsRaw = await apiCall(`/SavedJobs.php?student_id=${user.id}`, 'GET');
+    if (savedJobsRaw && Array.isArray(savedJobsRaw)) {
+      // Normalize saved jobs (they come from jobs table, so normalize them)
+      const saved = normalizeJobsFromAPI(savedJobsRaw);
+      DB.saveJobs(saved);
+      console.log(`💾 Fetched ${saved.length} fresh saved jobs from API`);
+      renderSavedJobsTab(user, saved, applied, apps);
+    } else {
+      renderSavedJobsTab(user, [], applied, apps);
+    }
+  } catch (error) {
+    console.warn('Failed to fetch saved jobs from API:', error);
+    // Fall back to localStorage
+    const saved = DB.getSavedJobs(user.id);
+    renderSavedJobsTab(user, saved, applied, apps);
   }
 }
 
@@ -1041,6 +1632,29 @@ function confirmJobOffer(appId, jobTitle, companyName) {
 
 function finalizeOfferConfirmation(appId) {
   DB.updateAppStatus(appId, 'Offer Confirmed');
+  
+  // Sync status update to API
+  apiCall('/Applications.php', 'POST', {
+    action: 'updatestatus',
+    id: appId,
+    status: 'Offer Confirmed'
+  }).then(result => {
+    if (result && result.success) {
+      console.log('✓ Offer confirmation synced to API');
+      // Fetch fresh applications to sync
+      const user = Auth.current();
+      apiCall(`/Applications.php?student_id=${user.id}`, 'GET').then(appsRaw => {
+        if (appsRaw && Array.isArray(appsRaw)) {
+          const apps = normalizeApplicationsFromAPI(appsRaw);
+          DB.saveApps(apps);
+          console.log(`✓ Synced ${apps.length} applications after offer confirmation`);
+        }
+      }).catch(err => console.warn('Failed to fetch applications:', err));
+    } else {
+      toast('Warning: Could not sync status to server', 'warn');
+    }
+  }).catch(err => console.warn('Failed to sync status update:', err));
+  
   closeModal();
   const user = Auth.current();
   toast('✓ Offer confirmed! The recruiter has been notified.', 'ok');
@@ -1095,12 +1709,42 @@ function handleResumeFile(file) {
 let _recruiterTab = 'jobs';
 let _jobSkills    = [];
 
-function renderRecruiterDash(tab='jobs') {
+async function renderRecruiterDash(tab='jobs') {
   _recruiterTab = tab;
   Router.curTab  = tab;
   const user = Auth.current();
   $('r-dash-name').textContent    = user.name.split(' ')[0];
   $('r-dash-company').textContent = user.company || 'Your Company';
+
+  // Fetch fresh applications from API
+  try {
+    const appsRaw = await apiCall(`/Applications.php?recruiter_id=${user.id}`, 'GET');
+    const apps = normalizeApplicationsFromAPI(appsRaw);
+    DB.saveApps(apps);
+    console.log(`✅ Fetched ${apps.length} fresh applications from API`);
+  } catch (error) {
+    console.warn('Failed to fetch applications:', error);
+  }
+  
+  // Fetch fresh interviews from API
+  try {
+    const interviewsRaw = await apiCall(`/Interviews.php?recruiter_id=${user.id}`, 'GET');
+    const interviews = normalizeInterviewsFromAPI(interviewsRaw);
+    DB.saveInterviews(interviews);
+    console.log(`📅 Fetched ${interviews.length} fresh interviews from API`);
+  } catch (error) {
+    console.warn('Failed to fetch interviews:', error);
+  }
+  
+  // Fetch fresh offers from API
+  try {
+    const offersRaw = await apiCall(`/Offers.php?recruiter_id=${user.id}`, 'GET');
+    const offers = normalizeOffersFromAPI(offersRaw);
+    DB.saveOffers(offers);
+    console.log(`🎁 Fetched ${offers.length} fresh offers from API`);
+  } catch (error) {
+    console.warn('Failed to fetch offers:', error);
+  }
 
   const myJobs = DB.getJobsByRecruiter(user.id);
   const allApps= DB.getAppsForRecruiter(user.id);
@@ -1122,6 +1766,29 @@ function renderRecruiterDash(tab='jobs') {
   if (tab==='applicants') renderApplicantsTab(allApps);
   if (tab==='offers')     renderOffersTab(user, myJobs);
   if (tab==='interviews') renderRecruiterInterviewsTab(user, myJobs);
+  if (tab==='settings')   renderRecruiterSettingsTab(user);
+}
+
+function renderRecruiterSettingsTab(user) {
+  const el = $('r-settings');
+  el.innerHTML = `
+    <div style="max-width:600px">
+      <div style="padding:20px;background:var(--bg2);border-radius:12px;border-left:4px solid var(--red);margin-bottom:20px">
+        <div style="font-weight:600;margin-bottom:12px;color:var(--red)">⚠️ Danger Zone</div>
+        <p style="color:var(--tx2);margin-bottom:16px;font-size:.9rem">Deleting your account is permanent and cannot be undone. All your job postings, applicants, and interview records will be deleted.</p>
+        <button class="btn" style="background:var(--red);color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-weight:600" onclick="initiateDeleteAccount('${user.id}','recruiter','${esc(user.name)}')">
+          🗑️ Delete My Account Permanently
+        </button>
+      </div>
+      
+      <div style="padding:16px;background:var(--bg2);border-radius:8px;color:var(--tx3);font-size:.85rem">
+        <strong>Account Information:</strong><br/>
+        Company: ${esc(user.company)}<br/>
+        Email: ${esc(user.email)}<br/>
+        Role: ${esc(user.role)}
+      </div>
+    </div>
+  `;
 }
 
 function renderRecruiterJobsTab(user, myJobs) {
@@ -1240,6 +1907,13 @@ function viewApplicantResume(studentId) {
 
 function updateAppStatus(appId, status) {
   DB.updateAppStatus(appId, status);
+  
+  // Sync status update to API
+  apiCall('/Applications.php', 'POST', {
+    action: 'updatestatus',
+    id: appId,
+    status: status
+  }).catch(err => console.warn('Failed to sync status update:', err));
   
   // Auto-add to selected candidates when accepted
   if (status === 'Accepted') {
@@ -1430,13 +2104,81 @@ function collectJobForm() {
   return { title,company,location:loc,stipend,duration:dur,paid,numberOfPositions:opps,deadline,logo,color,description:desc,skills:[..._jobSkills] };
 }
 
-function saveNewJob() {
-  const data = collectJobForm(); if (!data) return;
+async function saveNewJob() {
+  const data = collectJobForm(); 
+  if (!data) return;
+  
   const user = Auth.current();
-  DB.createJob({ ...data, recruiterId:user.id });
-  closeModal();
-  toast('Job posted successfully! 🎉');
-  renderRecruiterDash('jobs');
+  
+  // Critical: Validate user is logged in and has valid ID
+  if (!user || !user.id) {
+    toast('You must be logged in as a recruiter to post jobs', 'err');
+    Router.go('login', { role: 'recruiter' });
+    return;
+  }
+  
+  // Validate user is a recruiter
+  if (user.role !== 'recruiter') {
+    toast('Only recruiters can post jobs', 'err');
+    return;
+  }
+  
+  // Validate all required fields exist
+  const requiredFields = ['title', 'company', 'description', 'stipend', 'location', 'duration', 'deadline'];
+  for (let field of requiredFields) {
+    if (!data[field]) {
+      toast(`Missing required field: ${field}`, 'err');
+      return;
+    }
+  }
+  
+  // Ensure deadline is a string (in case it's a Date object)
+  const deadlineStr = data.deadline instanceof Date ? data.deadline.toISOString().split('T')[0] : String(data.deadline).trim();
+  
+  // Ensure opportunities is a positive integer
+  const opp = Math.max(1, parseInt(data.numberOfPositions) || 1);
+  
+  // Extract numeric recruiter_id
+  const recruiterId = parseInt(String(user.id).replace(/[^0-9]/g, ''));
+  
+  const payload = {
+    action: 'create',
+    recruiter_id: recruiterId,
+    title: String(data.title).trim(),
+    company: String(data.company).trim(),
+    description: String(data.description).trim(),
+    stipend: String(data.stipend).trim(),
+    location: String(data.location).trim(),
+    duration: String(data.duration).trim(),
+    deadline: deadlineStr,
+    opportunities: opp
+  };
+  
+  console.log('📝 Job payload:', payload);
+  console.log('📝 Recruiter ID type:', typeof payload.recruiter_id, 'Value:', payload.recruiter_id);
+  
+  const result = await apiCall('/Jobs.php', 'POST', payload);
+
+  if (result.success) {
+    closeModal();
+    toast('Job posted successfully! 🎉');
+    
+    // Fetch updated jobs and sync to localStorage
+    try {
+      const jobsRaw = await apiCall('/Jobs.php', 'GET');
+      const jobs = normalizeJobsFromAPI(jobsRaw);
+      DB.saveJobs(jobs);
+    } catch (error) {
+      console.error('Failed to refresh jobs:', error);
+    }
+    
+    // Trigger job sync for all connected students
+    document.dispatchEvent(new Event('newJobPosted'));
+    renderRecruiterDash('jobs');
+  } else {
+    console.error('Job posting failed:', result);
+    toast(result.error || 'Failed to post job', 'err');
+  }
 }
 
 function saveEditJob(id) {
@@ -1491,7 +2233,7 @@ function renderOffersTab(user, myJobs) {
             <div style="font-size:.85rem;color:var(--tx3)">📧 ${esc(cand.email)}</div>
           </div>
           <div style="display:flex;gap:8px">
-            <button class="btn btn-sm" style="background:#4CAF50;color:#fff;border:none" onclick="sendOfferLetter('${cand.id}','${esc(cand.name)}','${esc(cand.email)}','${job.id}')">Send Offer</button>
+            <button class="btn btn-sm" style="background:#4CAF50;color:#fff;border:none" onclick="sendOfferLetter('${cand.id}','${cand.studentId}','${esc(cand.name)}','${esc(cand.email)}','${job.id}')">Send Offer</button>
             <button class="btn btn-sm" style="background:#f44336;color:#fff;border:none" onclick="removeCandidateFromOffer('${job.id}','${cand.id}')">Remove</button>
           </div>
         </div>
@@ -1511,7 +2253,7 @@ function removeCandidateFromOffer(jobId, candId) {
   }
 }
 
-function sendOfferLetter(appId, candName, candEmail, jobId) {
+function sendOfferLetter(appId, studentId, candName, candEmail, jobId) {
   const job = DB.getJobById(jobId);
   const user = Auth.current();
   const offerText = `Dear ${candName},\n\nCongratulations! We are pleased to offer you the position of ${job.title} at ${user.company}.\n\nPosition Details:\n• Role: ${job.title}\n• Duration: ${job.duration}\n• Stipend: ${job.stipend}\n• Location: ${job.location}\n\nPlease confirm your acceptance by replying to this email.\n\nBest regards,\n${user.name}\n${user.company}`;
@@ -1524,25 +2266,56 @@ function sendOfferLetter(appId, candName, candEmail, jobId) {
       <div style="margin-top:12px;font-size:.78rem;color:var(--tx3)">💡 Tip: Customize the offer letter before sending</div>
       <div style="display:flex;gap:10px;margin-top:16px">
         <button class="btn btn-ghost" style="flex:1" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-recruiter" style="flex:1" onclick="confirmSendOffer('${appId}','${esc(candEmail)}','${jobId}')">✓ Send Offer</button>
+        <button class="btn btn-recruiter" style="flex:1" onclick="confirmSendOffer('${appId}','${studentId}','${esc(candEmail)}','${jobId}')">✓ Send Offer</button>
       </div>
     </div>`
   );
 }
 
-function confirmSendOffer(appId, candEmail, jobId) {
+function confirmSendOffer(appId, studentId, candEmail, jobId) {
   const offerText = $('offer-text')?.value || '';
   if (!offerText.trim()) { toast('Offer letter cannot be empty', 'err'); return; }
   
-  try {
-    toast(`✓ Offer letter sent to ${candEmail}!`, 'ok');
-    closeModal();
-    setTimeout(() => {
-      renderRecruiterDash('offers');
-    }, 500);
-  } catch(e) {
+  const user = Auth.current();
+  const student_id = parseInt(String(studentId).replace(/[^0-9]/g, ''));
+  const job_id = parseInt(String(jobId).replace(/[^0-9]/g, ''));
+  const recruiter_id = user.id;
+  
+  apiCall('/Offers.php', 'POST', {
+    action: 'send',
+    student_id: student_id,
+    job_id: job_id,
+    recruiter_id: recruiter_id,
+    offer_text: offerText
+  }).then(result => {
+    if (result && result.success) {
+      toast(`✓ Offer letter sent to ${candEmail}!`, 'ok');
+      closeModal();
+      
+      // Fetch fresh offers and sync to localStorage
+      apiCall(`/Offers.php?recruiter_id=${recruiter_id}`, 'GET').then(offersRaw => {
+        if (offersRaw && Array.isArray(offersRaw)) {
+          const offers = normalizeOffersFromAPI(offersRaw);
+          DB.saveOffers(offers);
+          console.log(`🎁 Synced ${offers.length} offers after sending`);
+        }
+        
+        // Remove candidate from selected candidates after offer sent
+        if (_selectedCandidates[job_id]) {
+          _selectedCandidates[job_id] = _selectedCandidates[job_id].filter(c => c.id !== appId);
+          localStorage.setItem('internhub_selected_candidates', JSON.stringify(_selectedCandidates));
+        }
+        
+        setTimeout(() => {
+          renderRecruiterDash('offers');
+        }, 500);
+      }).catch(err => console.warn('Failed to sync offers:', err));
+    } else {
+      toast('Error: ' + (result?.error || 'Failed to send offer'), 'err');
+    }
+  }).catch(e => {
     toast('Error sending offer: ' + e.message, 'err');
-  }
+  });
 }
 
 /* ── INTERVIEWS & TECHNICAL ROUNDS ────────────────────────── */
@@ -1718,33 +2491,55 @@ function finalizeScheduleInterview() {
     return;
   }
 
-  console.log('Creating interview with:');
-  console.log('  Recruiter ID:', user.id);
-  console.log('  Student ID:', candidate.studentId);
-  console.log('  Job ID:', candidate.jobId);
-  console.log('  Candidate Name:', candidate.name);
-  console.log('  Candidate Email:', candidate.email);
-  console.log('  Type:', type);
-  console.log('  Date:', date);
-  console.log('  Time:', time);
-  console.log('  Link:', link);
-  
-  // Create interview - this saves to localStorage
-  // Use candidate.studentId as the student ID for the interview
-  const interview = DB.createInterview(user.id, candidate.studentId, candidate.jobId, candidate.name, candidate.email, type, date, time, link);
-  
-  console.log('Interview created:', interview);
-  console.log('All interviews after creation:', DB.getInterviews());
-  
-  closeModal();
-  toast(`✓ Interview scheduled for ${candidate.name}`, 'ok');
-  
-  // Update both dashboards
-  renderRecruiterDash('interviews');
+  // Extract numeric IDs
+  const recruiterId = parseInt(String(user.id).replace(/[^0-9]/g, ''));
+  const studentId = parseInt(String(candidate.studentId).replace(/[^0-9]/g, ''));
+  const jobId = parseInt(String(candidate.jobId).replace(/[^0-9]/g, ''));
+
+  // Call API to schedule interview
+  apiCall('/Interviews.php', 'POST', {
+    action: 'schedule',
+    recruiter_id: recruiterId,
+    student_id: studentId,
+    job_id: jobId,
+    candidate_name: candidate.name,
+    candidate_email: candidate.email,
+    type: type,
+    interview_date: date,
+    interview_time: time,
+    join_link: link
+  }).then(async result => {
+    if (result.success) {
+      closeModal();
+      toast(`✓ Interview scheduled for ${candidate.name}`, 'ok');
+      
+      // Fetch fresh interviews from API
+      try {
+        const interviewsRaw = await apiCall(`/Interviews.php?recruiter_id=${user.id}`, 'GET');
+        const interviews = normalizeInterviewsFromAPI(interviewsRaw);
+        DB.saveInterviews(interviews);
+        console.log(`📅 Updated interviews (${interviews.length} total)`);
+      } catch (error) {
+        console.warn('Failed to sync interviews:', error);
+      }
+      
+      renderRecruiterDash('interviews');
+    } else {
+      toast(result.error || 'Failed to schedule interview', 'err');
+    }
+  });
 }
 
 function updateInterviewStatus(interviewId, status) {
   DB.updateInterviewStatus(interviewId, status);
+  
+  // Sync status update to API
+  apiCall('/Interviews.php', 'PUT', {
+    action: 'updatestatus',
+    id: interviewId,
+    status: status
+  }).catch(err => console.warn('Failed to sync interview status:', err));
+  
   const user = Auth.current();
   renderRecruiterDash('interviews');
   toast(`Interview status updated to "${status}"`, 'ok');
@@ -1753,6 +2548,12 @@ function updateInterviewStatus(interviewId, status) {
 function deleteInterviewRecord(interviewId) {
   if (!confirm('Are you sure you want to delete this interview?')) return;
   DB.deleteInterview(interviewId);
+  
+  // Sync deletion to API
+  apiCall('/Interviews.php', 'DELETE', {
+    id: interviewId
+  }).catch(err => console.warn('Failed to sync interview deletion:', err));
+  
   const user = Auth.current();
   renderRecruiterDash('interviews');
   toast('Interview deleted.', 'ok');
@@ -1760,8 +2561,33 @@ function deleteInterviewRecord(interviewId) {
 
 function markInterviewAttendance(interviewId, status) {
   DB.updateInterviewStatus(interviewId, status);
+  
+  // Sync status update to API - only update status, preserve student_id and recruiter_id
+  apiCall('/Interviews.php', 'PUT', {
+    action: 'updatestatus',
+    id: interviewId,
+    status: status
+  }).then(result => {
+    if (result && result.success) {
+      console.log(`✓ Interview attendance synced to API`);
+      // Fetch fresh interviews to ensure data consistency
+      const user = Auth.current();
+      apiCall(`/Interviews.php?student_id=${user.id}`, 'GET').then(interviewsRaw => {
+        if (interviewsRaw && Array.isArray(interviewsRaw)) {
+          const interviews = normalizeInterviewsFromAPI(interviewsRaw);
+          DB.saveInterviews(interviews);
+          console.log(`🎬 Synced ${interviews.length} interviews after marking attendance`);
+        }
+      }).catch(err => console.warn('Failed to fetch interviews:', err));
+    } else {
+      toast('Warning: Could not sync to server', 'warn');
+    }
+  }).catch(err => console.warn('Failed to sync interview attendance:', err));
+  
   const user = Auth.current();
-  renderStudentDash('interviews');
+  setTimeout(() => {
+    renderStudentDash('interviews');
+  }, 500);
   toast('✓ Interview marked as attended', 'ok');
 }
 
